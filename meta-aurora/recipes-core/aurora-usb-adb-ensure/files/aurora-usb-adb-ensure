@@ -8,27 +8,9 @@
 #     usb-moded never sees a data connection and the mode stays "undefined"
 #     until the watch is re-seated. -> simulate a data re-plug through the
 #     extcon shim's force_disable, then restart usb-moded as a last resort.
-# Every poll is logged so the cable/charger state at boot ends up in the
-# journal.
 want=adb_mode
 SHIM=/sys/devices/platform/soc/soc:extcon_usb_shim/force_disable
 USB=/sys/class/power_supply/usb
-
-extcon_state() {
-    for e in /sys/class/extcon/*; do
-        case "$(cat "$e/name" 2>/dev/null)" in
-            *"$1"*) tr '\n' ' ' < "$e/state" 2>/dev/null; return ;;
-        esac
-    done
-}
-
-log_state() {
-    echo "aurora-usb-adb-ensure: t=${1}s mode=${2:-?} present=$(cat $USB/present 2>/dev/null)" \
-         "online=$(cat $USB/online 2>/dev/null)" \
-         "usb_type=$(sed -n 's/.*\[\(.*\)\].*/\1/p' $USB/usb_type 2>/dev/null)" \
-         "chg_extcon=[$(extcon_state smblite)] shim_extcon=[$(extcon_state usb_shim)]" \
-         "udc=$(cat /config/usb_gadget/g1/UDC 2>/dev/null)"
-}
 
 ok=0
 undef=0
@@ -38,7 +20,6 @@ i=0
 mode=
 while [ $i -lt 40 ]; do
     mode=$(usb_moded_util -q 2>/dev/null | sed -n 's/^mode = //p')
-    log_state $((i * 3)) "$mode"
     case "$mode" in
         "$want")
             undef=0
