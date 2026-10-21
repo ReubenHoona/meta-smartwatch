@@ -220,6 +220,39 @@ if [ -f "$NETMGRD_RC" ] && ! mountpoint -q "$NETMGRD_RC"; then
     fi
 fi
 
+# GNSS assistance data. xtra-daemon checks the XTRA server's certificate
+# against XTRA_CA_PATH, which on stock points at a directory that does not
+# exist in the container: use the host's CA certificates, copied into /data
+# below. Without netd there is no network to bind its sockets to, and its own
+# SNTP client always asks for an invalid network, so have it inject the system
+# time (kept by connman's NTP) instead.
+GPS_CONF="$ROOTFS/vendor/etc/gps.conf"
+if [ -f "$GPS_CONF" ] && ! mountpoint -q "$GPS_CONF"; then
+    GPS_CONF_OVERLAY=/run/aurora-gps.conf
+    sed -e '/^XTRA_CA_PATH/d' -e '/^XTRA_SOCKET_BIND_ENABLE/d' -e '/^XTRA_SYSTEM_TIME_INJECT/d' \
+        "$GPS_CONF" > "$GPS_CONF_OVERLAY"
+    printf 'XTRA_CA_PATH = /data/aurora/cacerts\nXTRA_SOCKET_BIND_ENABLE = 0\nXTRA_SYSTEM_TIME_INJECT = 1\n' \
+        >> "$GPS_CONF_OVERLAY"
+    chmod 0644 "$GPS_CONF_OVERLAY"
+    if mount --bind "$GPS_CONF_OVERLAY" "$GPS_CONF"; then
+        echo "aurora-lxc-android: gps.conf overlaid (XTRA certificates)"
+    fi
+fi
+
+# xtra-daemon also asks Android's CA store for certificates through
+# vendor.qti.hardware.cacert, which the framework provides on stock. The vendor
+# manifest declares it, so the lookup waits for it forever and the download
+# never finishes. The client library is optional (dlopen'ed): without it
+# xtra-daemon verifies the server against its pinned roots and XTRA_CA_PATH.
+: > /run/aurora-no-cacertclient
+for CACERT_CLIENT in "$ROOTFS/vendor/lib/libcacertclient.so" "$ROOTFS/vendor/lib64/libcacertclient.so"; do
+    if [ -f "$CACERT_CLIENT" ] && ! mountpoint -q "$CACERT_CLIENT"; then
+        if mount --bind /run/aurora-no-cacertclient "$CACERT_CLIENT"; then
+            echo "aurora-lxc-android: masked $(basename "$(dirname "$CACERT_CLIENT")")/libcacertclient.so"
+        fi
+    fi
+done
+
 # Dump g1 state BEFORE container starts so we can compare against what
 # aurora-udc-bind sees later. init_gfs.service should have created g1 with
 # ffs.adb; this lets us know whether anything is touching it before LXC.
@@ -345,6 +378,18 @@ if [ -d "$ROOTFS/data" ] && ! mountpoint -q "$ROOTFS/data"; then
     else
         echo "aurora-lxc-android: WARNING /data tmpfs mount failed -> init_user0 will fail" >&2
     fi
+fi
+
+# CA certificates for xtra-daemon (XTRA_CA_PATH in the gps.conf overlay).
+# Copied rather than bind-mounted: the host's hash links point into
+# /usr/share, which the container cannot see.
+CACERTS="$ROOTFS/data/aurora/cacerts"
+if mountpoint -q "$ROOTFS/data" && [ ! -d "$CACERTS" ]; then
+    mkdir -p "$CACERTS"
+    cp -L /etc/ssl/certs/*.0 "$CACERTS/" 2>/dev/null
+    chmod 0755 "$ROOTFS/data/aurora" "$CACERTS"
+    chmod 0644 "$CACERTS"/* 2>/dev/null
+    echo "aurora-lxc-android: $(ls "$CACERTS" | wc -l) CA certificates for xtra-daemon"
 fi
 
 # /mnt tmpfs + bind /persist into /mnt/vendor/persist
