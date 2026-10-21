@@ -20,6 +20,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 SRC_URI = "\
     file://aurora-vkb-assemble.py \
+    file://aurora-split-dtbs.py \
     file://aurora-vkb-modules.lst \
     file://static/modules.alias \
     file://static/modules.softdep \
@@ -139,36 +140,52 @@ do_compile() {
     find ${WORKDIR}/vkb_ramdisk -name "*.ko" -exec "$LLVM_STRIP" --strip-debug {} \;
     bbnote "stripped debug info from aarch64 kernel modules"
 
-    # ─── Step 3: ramoops DTB. Base = static vkb-base.dtb (stock,
-    #            bootloader-approved with qcom,msm-id + qcom,board-id
-    #            intact). Inject ramoops node so kernel pstore mounts. ───
-    cp ${S}/static/vkb-base.dtb ${WORKDIR}/dtb-ramoops.dtb
+    # ─── Step 3: patch the base DTBs. vkb-base.dtb (stock, bootloader-approved
+    #     with qcom,msm-id + qcom,board-id intact) holds one DTB per SoC
+    #     variant: MonacoP (msm-id 0x205) and Monaco (msm-id 0x1e6). The
+    #     bootloader picks the one matching the SoC and refuses to boot when
+    #     none matches. fdtput only reads/writes the FIRST tree of a file, so
+    #     split the blob, patch every tree, and concatenate them again --
+    #     otherwise Monaco watches (e.g. Pixel Watch 2 LTE "eos") never start
+    #     the kernel. ───
     FDTPUT=${STAGING_BINDIR_NATIVE}/fdtput
-    N=/reserved-memory/ramoops@61F00000
-    "${FDTPUT}" -c ${WORKDIR}/dtb-ramoops.dtb "$N"
-    "${FDTPUT}" -t s ${WORKDIR}/dtb-ramoops.dtb "$N" compatible ramoops
-    "${FDTPUT}"      ${WORKDIR}/dtb-ramoops.dtb "$N" no-map
-    "${FDTPUT}" -t x ${WORKDIR}/dtb-ramoops.dtb "$N" reg 0 ${RAMOOPS_BASE} 0 ${RAMOOPS_SIZE}
-    "${FDTPUT}" -t x ${WORKDIR}/dtb-ramoops.dtb "$N" record-size ${RAMOOPS_RECORD}
-    "${FDTPUT}" -t x ${WORKDIR}/dtb-ramoops.dtb "$N" console-size ${RAMOOPS_CONSOLE}
-    "${FDTPUT}" -t x ${WORKDIR}/dtb-ramoops.dtb "$N" pmsg-size ${RAMOOPS_PMSG}
-    bbnote "ramoops node injected into base DTB"
+    rm -rf ${WORKDIR}/vkb-dtbs
+    NDTB=$(python3 ${S}/aurora-split-dtbs.py ${S}/static/vkb-base.dtb ${WORKDIR}/vkb-dtbs)
+    bbnote "vkb-base.dtb holds $NDTB DTB(s)"
+    : > ${WORKDIR}/dtb-ramoops.dtb
+    i=0
+    while [ $i -lt $NDTB ]; do
+        D=${WORKDIR}/vkb-dtbs/dtb-$i.dtb
 
-    # ─── Step 3b: continuous-splash framebuffer node. The bootloader paints
-    #     the boot logo into splash_region@0x5c000000 and SDE keeps scanning it
-    #     until the composer takes over. qcom-cont-splash-fb binds this node and
-    #     exposes that live buffer as /dev/fb0 for psplash. Geometry is the
-    #     panel native res (384x384, 32bpp xRGB, stride 384*4=1536); frame =
-    #     1536*384 = 0x90000 bytes. ───
-    S_NODE=/cont-splash-fb
-    "${FDTPUT}" -c ${WORKDIR}/dtb-ramoops.dtb "$S_NODE"
-    "${FDTPUT}" -t s ${WORKDIR}/dtb-ramoops.dtb "$S_NODE" compatible "qcom,cont-splash-fb"
-    "${FDTPUT}" -t x ${WORKDIR}/dtb-ramoops.dtb "$S_NODE" reg 0 0x5c000000 0 0x90000
-    "${FDTPUT}" -t u ${WORKDIR}/dtb-ramoops.dtb "$S_NODE" width 384
-    "${FDTPUT}" -t u ${WORKDIR}/dtb-ramoops.dtb "$S_NODE" height 384
-    "${FDTPUT}" -t u ${WORKDIR}/dtb-ramoops.dtb "$S_NODE" stride 1536
-    "${FDTPUT}" -t s ${WORKDIR}/dtb-ramoops.dtb "$S_NODE" format "x8r8g8b8"
-    bbnote "cont-splash-fb node injected into base DTB"
+        # 3a: ramoops node so kernel pstore mounts.
+        N=/reserved-memory/ramoops@61F00000
+        "$FDTPUT" -c $D "$N"
+        "$FDTPUT" -t s $D "$N" compatible ramoops
+        "$FDTPUT"      $D "$N" no-map
+        "$FDTPUT" -t x $D "$N" reg 0 ${RAMOOPS_BASE} 0 ${RAMOOPS_SIZE}
+        "$FDTPUT" -t x $D "$N" record-size ${RAMOOPS_RECORD}
+        "$FDTPUT" -t x $D "$N" console-size ${RAMOOPS_CONSOLE}
+        "$FDTPUT" -t x $D "$N" pmsg-size ${RAMOOPS_PMSG}
+
+        # 3b: continuous-splash framebuffer node. The bootloader paints the
+        # boot logo into splash_region@0x5c000000 (same address in both SoC
+        # trees) and SDE keeps scanning it until the composer takes over.
+        # qcom-cont-splash-fb binds this node and exposes that live buffer as
+        # /dev/fb0 for psplash. Geometry is the panel native res (384x384,
+        # 32bpp xRGB, stride 384*4=1536); frame = 1536*384 = 0x90000 bytes.
+        S_NODE=/cont-splash-fb
+        "$FDTPUT" -c $D "$S_NODE"
+        "$FDTPUT" -t s $D "$S_NODE" compatible "qcom,cont-splash-fb"
+        "$FDTPUT" -t x $D "$S_NODE" reg 0 0x5c000000 0 0x90000
+        "$FDTPUT" -t u $D "$S_NODE" width 384
+        "$FDTPUT" -t u $D "$S_NODE" height 384
+        "$FDTPUT" -t u $D "$S_NODE" stride 1536
+        "$FDTPUT" -t s $D "$S_NODE" format "x8r8g8b8"
+
+        cat $D >> ${WORKDIR}/dtb-ramoops.dtb
+        i=$((i + 1))
+    done
+    bbnote "ramoops + cont-splash-fb nodes injected into all $NDTB base DTBs"
 
     # ─── Step 4: cpio + lz4 the vkb ramdisk ───
     ( cd ${WORKDIR}/vkb_ramdisk && find . | sort | \
