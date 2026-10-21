@@ -1,0 +1,11 @@
+[Unit]
+Description=Aurora: keep usb-moded in adb_mode after boot (works around the adbd/usb-moded start race)
+After=usb-moded.service android-tools-adbd.service
+Wants=usb-moded.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/aurora-usb-adb-ensure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+#!/bin/sh
+# Make sure usb-moded ends up in its default adb_mode after boot.
+#
+# At boot usb-moded can pick its mode before adbd has its FunctionFS endpoints
+# up; set_udc then fails and usb-moded falls back to charging-only (the host
+# sees a mass-storage device and no adb) until the cable is re-plugged. Watch
+# the mode for a couple of minutes and request adb_mode again whenever it is
+# connected but not in adb_mode. "undefined" means no cable: usb-moded applies
+# the default itself on the next plug, when adbd is long ready.
+want=adb_mode
+ok=0
+i=0
+mode=
+while [ $i -lt 40 ]; do
+    mode=$(usb_moded_util -q 2>/dev/null | sed -n 's/^mode = //p')
+    case "$mode" in
+        "$want")
+            ok=$((ok + 1))
+            if [ $ok -ge 3 ]; then
+                echo "aurora-usb-adb-ensure: $want active"
+                exit 0
+            fi ;;
+        ""|undefined)
+            ok=0 ;;
+        *)
+            ok=0
+            echo "aurora-usb-adb-ensure: mode is '$mode', requesting $want"
+            usb_moded_util -s "$want" >/dev/null 2>&1 ;;
+    esac
+    i=$((i + 1))
+    sleep 3
+done
+echo "aurora-usb-adb-ensure: stopped watching (last mode '$mode')"
+exit 0
