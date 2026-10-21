@@ -204,6 +204,22 @@ if [ -f "$IZAT" ] && ! mountpoint -q "$IZAT"; then
     fi
 fi
 
+# No mobile data stack. netmgrd (Qualcomm's mobile data manager) has nothing to
+# manage here and retries its modem QMI clients in a tight loop, leaking a
+# socket and a pipe pair per attempt. It saturates the CPU and floods the modem
+# with IPC, which starves the modem's GNSS tracking: no satellite is ever
+# acquired. Mark the service disabled so init never starts it.
+NETMGRD_RC="$VENDOR_INIT/netmgrd.rc"
+if [ -f "$NETMGRD_RC" ] && ! mountpoint -q "$NETMGRD_RC"; then
+    NETMGRD_RC_OVERLAY=/run/aurora-netmgrd.rc
+    awk '{ print } /^service vendor\.netmgrd / { print "    disabled" }' \
+        "$NETMGRD_RC" > "$NETMGRD_RC_OVERLAY"
+    chmod 0644 "$NETMGRD_RC_OVERLAY"
+    if mount --bind "$NETMGRD_RC_OVERLAY" "$NETMGRD_RC"; then
+        echo "aurora-lxc-android: netmgrd disabled"
+    fi
+fi
+
 # Dump g1 state BEFORE container starts so we can compare against what
 # aurora-udc-bind sees later. init_gfs.service should have created g1 with
 # ffs.adb; this lets us know whether anything is touching it before LXC.
