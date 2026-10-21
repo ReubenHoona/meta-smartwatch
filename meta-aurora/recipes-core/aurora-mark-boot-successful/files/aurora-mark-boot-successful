@@ -1,0 +1,161 @@
+#!/usr/bin/perl
+# Mark the running A/B slot as successfully booted, like Android's Qualcomm
+# boot_control HAL (markBootSuccessful) does after a good boot.
+#
+# abl keeps per-slot state in byte 6 of the 64-bit GPT attributes of the
+# boot_<slot> entry: bits 0-1 priority, 2 active, 3-5 retry count,
+# 6 successful, 7 unbootable. While "successful" is clear, abl decrements the
+# retry count on every boot and finally marks the slot unbootable, after which
+# the watch only enters fastboot. Normally the Halium container's vendor
+# android.hardware.boot@1.2-service marks the slot; this is the fallback for
+# boots where the container does not come up.
+#
+# Like abl and the boot HAL on this platform, only the PRIMARY GPT is updated
+# (the backup's attribute bytes are left stale by them, too). Safety: both
+# copies must have valid header and entry CRCs and may differ only in partition
+# attribute bytes, otherwise nothing is written. Only one attribute byte is
+# changed (successful set, unbootable cleared); it is a no-op when the slot is
+# already marked. The write is re-read from disk and verified.
+# Uses no perl modules beyond strict/warnings (AsteroidOS ships a bare perl).
+use strict;
+use warnings;
+
+my $DISK = $ENV{AURORA_GPT_DISK} // '/dev/mmcblk0';   # override for testing only
+my $SS   = 512;
+my $DRY  = grep { $_ eq '--dry-run' } @ARGV;
+my $wrote = 0;
+
+sub logm { print "aurora-mark-boot-successful: @_\n" }
+sub fail {
+    logm("ERROR: @_" . ($wrote ? ' (primary GPT was already updated)' : ' (GPT left untouched)'));
+    exit 1;
+}
+
+# ---- current slot
+my $suffix = $ENV{AURORA_SLOT_SUFFIX};               # override for testing only
+if (!$suffix && open my $bc, '<', '/proc/bootconfig') {
+    while (<$bc>) { $suffix = $1 if /^androidboot\.slot_suffix\s*=\s*"(_[ab])"/ }
+    close $bc;
+}
+if (!$suffix && open my $cl, '<', '/proc/cmdline') {
+    my $c = <$cl> // '';
+    $suffix = $1 if $c =~ /androidboot\.slot_suffix=(_[ab])/;
+    close $cl;
+}
+fail('cannot determine slot suffix') unless $suffix;
+my $target = "boot$suffix";
+
+# ---- CRC-32 (IEEE, as used by GPT)
+my @T = map {
+    my $c = $_;
+    $c = ($c & 1) ? (0xEDB88320 ^ ($c >> 1)) : ($c >> 1) for 1 .. 8;
+    $c
+} 0 .. 255;
+sub crc32 {
+    my $c = 0xFFFFFFFF;
+    $c = $T[($c ^ $_) & 0xFF] ^ ($c >> 8) for unpack 'C*', $_[0];
+    return $c ^ 0xFFFFFFFF;
+}
+
+# ---- raw disk I/O
+my $fh;
+sub dopen { open($fh, '+<:raw', $DISK) or fail("open $DISK: $!") }
+sub rd {
+    my ($off, $len) = @_;
+    defined sysseek($fh, $off, 0) or fail("seek $off: $!");
+    my $b = '';
+    my $n = sysread($fh, $b, $len);
+    fail("short read at $off") unless defined $n && $n == $len;
+    return $b;
+}
+sub wr {
+    my ($off, $b) = @_;
+    defined sysseek($fh, $off, 0) or fail("seek $off: $!");
+    my $n = syswrite($fh, $b);
+    fail("short write at $off") unless defined $n && $n == length $b;
+}
+sub flush_to_disk {
+    close $fh;
+    system('sync');
+    if (open my $dc, '>', '/proc/sys/vm/drop_caches') { print $dc "3\n"; close $dc }
+    dopen();
+}
+
+sub load_gpt {
+    my ($lba) = @_;
+    my $h = rd($lba * $SS, $SS);
+    fail("no GPT signature at LBA $lba") unless substr($h, 0, 8) eq 'EFI PART';
+    my ($hsz, $hcrc) = unpack 'V V', substr($h, 12, 8);
+    my ($cur, $bak)  = unpack 'Q< Q<', substr($h, 24, 16);
+    my ($elba)       = unpack 'Q<', substr($h, 72, 8);
+    my ($n, $esz, $ecrc) = unpack 'V V V', substr($h, 80, 12);
+    fail("unexpected GPT header at LBA $lba")
+        unless $hsz >= 92 && $hsz <= $SS && $cur == $lba && $esz == 128 && $n > 0 && $n <= 256;
+    my $hh = substr($h, 0, $hsz);
+    substr($hh, 16, 4, "\0" x 4);
+    fail("header CRC mismatch at LBA $lba") unless crc32($hh) == $hcrc;
+    my $ents = rd($elba * $SS, $n * $esz);
+    fail("entry array CRC mismatch (header at LBA $lba)") unless crc32($ents) == $ecrc;
+    return { lba => $lba, hdr => $h, hsz => $hsz, bak => $bak, elba => $elba,
+             n => $n, esz => $esz, ents => $ents };
+}
+
+sub entry_name {
+    my ($e) = @_;
+    my $s = '';
+    for (unpack 'v36', substr($e, 56, 72)) { last unless $_; $s .= chr }
+    return $s;
+}
+
+sub with_entries {
+    my ($g, $ents) = @_;
+    my $h = $g->{hdr};
+    substr($h, 88, 4, pack 'V', crc32($ents));
+    substr($h, 16, 4, "\0" x 4);
+    substr($h, 16, 4, pack 'V', crc32(substr($h, 0, $g->{hsz})));
+    return $h;
+}
+
+sub without_attrs {
+    my ($ents, $n) = @_;
+    my $s = $ents;
+    substr($s, $_ * 128 + 48, 8, "\0" x 8) for 0 .. $n - 1;
+    return $s;
+}
+
+dopen();
+my $p = load_gpt(1);
+my $b = load_gpt($p->{bak});
+fail('primary and backup GPT disagree beyond attribute bytes')
+    unless $p->{n} == $b->{n} && without_attrs($p->{ents}, $p->{n}) eq without_attrs($b->{ents}, $b->{n});
+
+my $idx;
+for my $i (0 .. $p->{n} - 1) {
+    if (entry_name(substr($p->{ents}, $i * 128, 128)) eq $target) { $idx = $i; last }
+}
+fail("no $target partition in GPT") unless defined $idx;
+
+my $off = $idx * 128 + 48 + 6;
+my $old = ord substr($p->{ents}, $off, 1);
+if (($old & 0x40) && !($old & 0x80)) {
+    logm(sprintf '%s already marked successful (attr 0x%02X)', $target, $old);
+    exit 0;
+}
+my $new = ($old | 0x40) & 0x7F;
+logm(sprintf '%s (p%d): attr 0x%02X -> 0x%02X%s', $target, $idx + 1, $old, $new,
+     $DRY ? ' [dry run, nothing written]' : '');
+exit 0 if $DRY;
+
+my $ents = $p->{ents};
+substr($ents, $off, 1, chr $new);
+my $ph = with_entries($p, $ents);
+
+wr($p->{elba} * $SS, $ents);
+wr($p->{lba} * $SS, $ph);
+$wrote = 1;
+flush_to_disk();
+my $p2 = load_gpt(1);
+fail('primary GPT read-back mismatch') unless $p2->{ents} eq $ents && $p2->{hdr} eq $ph;
+close $fh;
+logm("$target marked successful; primary GPT verified");
+exit 0;

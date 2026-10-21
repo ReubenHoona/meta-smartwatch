@@ -1,0 +1,7 @@
+[Unit]
+Description=Aurora: mark the running A/B slot as successfully booted (fallback for the boot HAL)
+ConditionPathExists=/dev/mmcblk0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/aurora-mark-boot-successful

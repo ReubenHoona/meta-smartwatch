@@ -1,0 +1,9 @@
+[Unit]
+Description=Aurora: mark the A/B slot successful once the system has stayed up for 90s
+
+[Timer]
+OnBootSec=90s
+Unit=aurora-mark-boot-successful.service
+
+[Install]
+WantedBy=timers.target
