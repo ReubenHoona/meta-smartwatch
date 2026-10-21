@@ -16,7 +16,11 @@
 # starting the compositor late: we hold the UI until the HALs are up (or a
 # deadline), instead of letting it race a half-initialised container.
 FLAG=/run/aurora-hal-ready
-DEADLINE=$(( $(date +%s) + 35 ))   # hard wall-clock cap; never block the UI forever
+# Hard cap so the UI is never blocked forever. Measured on the monotonic clock:
+# the wall clock jumps during boot (no persistent RTC; swclock-offset and
+# timed set it), which used to blow through a date-based deadline at once.
+uptime_s() { cut -d. -f1 /proc/uptime; }
+DEADLINE=$(( $(uptime_s) + 35 ))
 
 hal_ready() {
     pid=$(lxc-info -n android -p 2>/dev/null | awk '{print $2}')
@@ -29,7 +33,7 @@ hal_ready() {
     return 0
 }
 
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+while [ "$(uptime_s)" -lt "$DEADLINE" ]; do
     if hal_ready; then
         echo "aurora-hal-ready: composer + bluetooth HALs registered"
         : > "$FLAG"
