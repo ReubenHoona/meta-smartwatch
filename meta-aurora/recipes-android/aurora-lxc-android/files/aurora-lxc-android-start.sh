@@ -184,6 +184,26 @@ if [ -f "$QTI_KERNEL_RC" ] && ! mountpoint -q "$QTI_KERNEL_RC"; then
     fi
 fi
 
+# Location without sensor-assisted positioning. With izat.conf's SAP=PREMIUM and
+# the dead-reckoning engine (engine-service DRE-INT) enabled, starting GNSS makes
+# the location stack open accelerometer/gyro streams on the ADSP sensor framework,
+# whose sensor_process then crashes ("PD_ERR: sensor_process ... SNS_SEE") and
+# takes the whole ADSP (sensors + audio) down with it. Overlay izat.conf with
+# SAP=DISABLED and the DRE engine disabled; plain GNSS is unaffected.
+IZAT="$ROOTFS/vendor/etc/izat.conf"
+if [ -f "$IZAT" ] && ! mountpoint -q "$IZAT"; then
+    IZAT_OVERLAY=/run/aurora-izat.conf
+    awk '/^SAP=/ { print "SAP=DISABLED"; next }
+         /^PROCESS_NAME=/ { dre = 0 }
+         /^PROCESS_ARGUMENT=DRE-INT/ { dre = 1 }
+         dre && /^PROCESS_STATE=/ { print "PROCESS_STATE=DISABLED"; next }
+         { print }' "$IZAT" > "$IZAT_OVERLAY"
+    chmod 0644 "$IZAT_OVERLAY"
+    if mount --bind "$IZAT_OVERLAY" "$IZAT"; then
+        echo "aurora-lxc-android: izat.conf overlaid (SAP and DRE engine disabled)"
+    fi
+fi
+
 # Dump g1 state BEFORE container starts so we can compare against what
 # aurora-udc-bind sees later. init_gfs.service should have created g1 with
 # ffs.adb; this lets us know whether anything is touching it before LXC.
