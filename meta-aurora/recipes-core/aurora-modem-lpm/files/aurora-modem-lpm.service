@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the modem in low power mode
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/aurora-modem-lpm
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
