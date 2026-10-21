@@ -60,6 +60,10 @@ do_configure:prepend() {
     echo "# CONFIG_LTO_CLANG_FULL is not set" >> ${WORKDIR}/defconfig
     echo "# CONFIG_LTO_CLANG is not set" >> ${WORKDIR}/defconfig
     echo "CONFIG_LTO_NONE=y" >> ${WORKDIR}/defconfig
+    # monaco_GKI.config has the watchdog print the top IRQ counters at every
+    # pet (~9.5 s), flooding the kernel log so boot messages scroll out of it.
+    # It is debug output; Qualcomm's gen3auto configs leave it off too.
+    echo "# CONFIG_QCOM_IRQ_STAT is not set" >> ${WORKDIR}/defconfig
     echo "# CONFIG_CFI_CLANG is not set" >> ${WORKDIR}/defconfig
     # Keep the SoC/vendor drivers =m; do not fold them into vmlinux. Qualcomm
     # vendor drivers resolve many symbols only at module-load (e.g.
