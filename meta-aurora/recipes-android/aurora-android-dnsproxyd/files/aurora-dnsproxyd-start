@@ -1,0 +1,14 @@
+#!/bin/sh
+# Serve DNS to the Android container: wait for Android init to create the
+# container's /dev/socket, then answer on its dnsproxyd socket.
+i=0
+while [ $i -lt 120 ]; do
+    pid=$(timeout 5 lxc-info -n android -pH 2>/dev/null)
+    if [ -n "$pid" ] && [ -d "/proc/$pid/root/dev/socket" ]; then
+        exec /usr/libexec/aurora-dnsproxyd "/proc/$pid/root/dev/socket/dnsproxyd"
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+echo "aurora-dnsproxyd: the Android container is not running" >&2
+exit 1

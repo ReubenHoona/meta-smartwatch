@@ -1,0 +1,14 @@
+[Unit]
+Description=DNS for the Android container (netd dnsproxyd stand-in)
+After=aurora-lxc-android.service
+BindsTo=aurora-lxc-android.service
+PartOf=aurora-lxc-android.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/aurora-dnsproxyd-start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=aurora-lxc-android.service
