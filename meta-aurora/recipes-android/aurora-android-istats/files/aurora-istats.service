@@ -1,0 +1,13 @@
+[Unit]
+Description=IStats stand-in for the Android container
+After=aurora-lxc-android.service
+Wants=aurora-lxc-android.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/aurora-istats
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
