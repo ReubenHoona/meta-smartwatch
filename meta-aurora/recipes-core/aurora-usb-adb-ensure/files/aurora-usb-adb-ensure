@@ -1,29 +1,73 @@
 #!/bin/sh
 # Make sure usb-moded ends up in its default adb_mode after boot.
 #
-# At boot usb-moded can pick its mode before adbd has its FunctionFS endpoints
-# up; set_udc then fails and usb-moded falls back to charging-only (the host
-# sees a mass-storage device and no adb) until the cable is re-plugged. Watch
-# the mode for a couple of minutes and request adb_mode again whenever it is
-# connected but not in adb_mode. "undefined" means no cable: usb-moded applies
-# the default itself on the next plug, when adbd is long ready.
+# Two failure modes have been seen on aurora/eos:
+#  1. usb-moded picks its mode before adbd has its FunctionFS endpoints up;
+#     set_udc fails and it falls back to charging-only. -> request adb_mode.
+#  2. The watch sits on the charging puck from power-on: VBUS is present but
+#     usb-moded never sees a data connection and the mode stays "undefined"
+#     until the watch is re-seated. -> simulate a data re-plug through the
+#     extcon shim's force_disable, then restart usb-moded as a last resort.
+# Every poll is logged so the cable/charger state at boot ends up in the
+# journal.
 want=adb_mode
+SHIM=/sys/devices/platform/soc/soc:extcon_usb_shim/force_disable
+USB=/sys/class/power_supply/usb
+
+extcon_state() {
+    for e in /sys/class/extcon/*; do
+        case "$(cat "$e/name" 2>/dev/null)" in
+            *"$1"*) tr '\n' ' ' < "$e/state" 2>/dev/null; return ;;
+        esac
+    done
+}
+
+log_state() {
+    echo "aurora-usb-adb-ensure: t=${1}s mode=${2:-?} present=$(cat $USB/present 2>/dev/null)" \
+         "online=$(cat $USB/online 2>/dev/null)" \
+         "usb_type=$(sed -n 's/.*\[\(.*\)\].*/\1/p' $USB/usb_type 2>/dev/null)" \
+         "chg_extcon=[$(extcon_state smblite)] shim_extcon=[$(extcon_state usb_shim)]" \
+         "udc=$(cat /config/usb_gadget/g1/UDC 2>/dev/null)"
+}
+
 ok=0
+undef=0
+replug_done=0
+restart_done=0
 i=0
 mode=
 while [ $i -lt 40 ]; do
     mode=$(usb_moded_util -q 2>/dev/null | sed -n 's/^mode = //p')
+    log_state $((i * 3)) "$mode"
     case "$mode" in
         "$want")
+            undef=0
             ok=$((ok + 1))
             if [ $ok -ge 3 ]; then
                 echo "aurora-usb-adb-ensure: $want active"
                 exit 0
             fi ;;
         ""|undefined)
-            ok=0 ;;
+            ok=0
+            if [ "$(cat $USB/present 2>/dev/null)" = 1 ]; then
+                undef=$((undef + 1))
+            else
+                undef=0
+            fi
+            if [ $undef -ge 5 ] && [ $replug_done = 0 ] && [ -w $SHIM ]; then
+                replug_done=1
+                undef=0
+                echo "aurora-usb-adb-ensure: VBUS present but no data connection; simulating a re-plug"
+                echo 1 > $SHIM; sleep 2; echo 0 > $SHIM
+            elif [ $undef -ge 5 ] && [ $restart_done = 0 ]; then
+                restart_done=1
+                undef=0
+                echo "aurora-usb-adb-ensure: still no data connection; restarting usb-moded"
+                systemctl restart usb-moded.service
+            fi ;;
         *)
             ok=0
+            undef=0
             echo "aurora-usb-adb-ensure: mode is '$mode', requesting $want"
             usb_moded_util -s "$want" >/dev/null 2>&1 ;;
     esac
