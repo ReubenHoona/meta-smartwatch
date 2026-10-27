@@ -225,7 +225,7 @@ def main():
                 key, rest = line.split(":", 1)
                 key = key.strip()
                 key = key[len(PFX):] if key.startswith(PFX) else key
-                if key in dropped:
+                if key in dropped or key[:-3] in dropped:  # @drop takes bare names
                     continue
                 ps = [p.strip() for p in rest.split() if p.strip()]
                 ps = [p[len(PFX):] if p.startswith(PFX) else p for p in ps]
